@@ -2,26 +2,20 @@ import * as XLSX from 'xlsx';
 import type { Requirement } from '../types/requirements.ts';
 import type { RequirementCategory, RequirementType, RequirementStatus, RequirementPriority, VerificationMethod } from '../types/enums.ts';
 
-// ─── Column mapping ───────────────────────────────────────
+// ─── Column order (export & template) ────────────────────
+// Exactly the 10 columns requested, in order.
 
 const EXPORT_COLUMNS = [
-  { header: 'Identifier', key: 'identifier' },
-  { header: 'Title', key: 'title' },
-  { header: 'Description', key: 'description' },
-  { header: 'Rationale', key: 'rationale' },
-  { header: 'Category', key: 'category' },
-  { header: 'Type', key: 'reqType' },
-  { header: 'Status', key: 'status' },
-  { header: 'Priority', key: 'priority' },
-  { header: 'Owner', key: 'owner' },
-  { header: 'Verification Method', key: 'verificationMethod' },
-  { header: 'Acceptance Criteria', key: 'acceptanceCriteria' },
-  { header: 'Created By', key: 'createdBy' },
-  { header: 'Nominal Value', key: 'nominalValue' },
-  { header: 'Min Value', key: 'minValue' },
-  { header: 'Max Value', key: 'maxValue' },
-  { header: 'Unit', key: 'unit' },
-  { header: 'Applicable Standards', key: 'applicableStandards' },
+  'Identifier',
+  'Formal Requirement Title',
+  'Category',
+  'Type',
+  'Status',
+  'Priority',
+  'Acceptance Criteria',
+  'Rationale',
+  'Value +/- Tolerance',
+  'Owner',
 ] as const;
 
 // ─── Valid enum values ────────────────────────────────────
@@ -32,47 +26,131 @@ const VALID_STATUSES: RequirementStatus[] = ['draft', 'in_review', 'approved', '
 const VALID_PRIORITIES: RequirementPriority[] = ['critical', 'high', 'medium', 'low'];
 const VALID_METHODS: VerificationMethod[] = ['analysis', 'test', 'inspection', 'demonstration', 'similarity'];
 
+// ─── Value +/- Tolerance helpers ─────────────────────────
+
+/**
+ * Format nominalValue / minValue / maxValue / unit into a single string.
+ * Examples:
+ *   5.0 [4.5–5.5] kg
+ *   5.0 kg
+ *   5.0
+ */
+function formatValueTolerance(r: Requirement): string {
+  const { nominalValue, minValue, maxValue, unit } = r;
+  if (nominalValue === undefined && minValue === undefined && maxValue === undefined) return '';
+  let s = nominalValue !== undefined ? String(nominalValue) : '';
+  if (minValue !== undefined || maxValue !== undefined) {
+    const lo = minValue !== undefined ? String(minValue) : '–';
+    const hi = maxValue !== undefined ? String(maxValue) : '–';
+    s += ` [${lo}–${hi}]`;
+  }
+  if (unit) s += ` ${unit}`;
+  return s.trim();
+}
+
+/**
+ * Parse "Value +/- Tolerance" cell back into components. Accepts:
+ *   "5.0 [4.5–5.5] kg"   → nominal=5, min=4.5, max=5.5, unit=kg
+ *   "5.0 ± 0.5 kg"        → nominal=5, min=4.5, max=5.5, unit=kg
+ *   "5.0 kg"              → nominal=5, unit=kg
+ *   "5.0"                 → nominal=5
+ */
+function parseValueTolerance(raw: string): {
+  nominalValue?: number;
+  minValue?: number;
+  maxValue?: number;
+  unit?: string;
+} {
+  const s = raw.trim();
+  if (!s) return {};
+
+  // "5.0 [4.5–5.5] kg"  (– is en-dash or regular hyphen)
+  const bracketMatch = s.match(/^([\d.]+)\s*\[([\d.]+)\s*[–\-]\s*([\d.]+)\]\s*(.*)$/);
+  if (bracketMatch) {
+    return {
+      nominalValue: parseFloat(bracketMatch[1]),
+      minValue: parseFloat(bracketMatch[2]),
+      maxValue: parseFloat(bracketMatch[3]),
+      unit: bracketMatch[4].trim() || undefined,
+    };
+  }
+
+  // "5.0 ± 0.5 kg"
+  const pmMatch = s.match(/^([\d.]+)\s*±\s*([\d.]+)\s*(.*)$/);
+  if (pmMatch) {
+    const nominal = parseFloat(pmMatch[1]);
+    const tol = parseFloat(pmMatch[2]);
+    return {
+      nominalValue: nominal,
+      minValue: Math.round((nominal - tol) * 1e9) / 1e9,
+      maxValue: Math.round((nominal + tol) * 1e9) / 1e9,
+      unit: pmMatch[3].trim() || undefined,
+    };
+  }
+
+  // "5.0 kg" or "5.0"
+  const simpleMatch = s.match(/^([\d.]+)\s*(.*)$/);
+  if (simpleMatch) {
+    return {
+      nominalValue: parseFloat(simpleMatch[1]),
+      unit: simpleMatch[2].trim() || undefined,
+    };
+  }
+
+  return {};
+}
+
+// ─── Column widths ────────────────────────────────────────
+
+const COL_WIDTHS: Record<string, number> = {
+  'Identifier': 14,
+  'Formal Requirement Title': 35,
+  'Category': 14,
+  'Type': 14,
+  'Status': 14,
+  'Priority': 12,
+  'Acceptance Criteria': 55,
+  'Rationale': 45,
+  'Value +/- Tolerance': 22,
+  'Owner': 18,
+};
+
 // ─── Export ───────────────────────────────────────────────
 
 export function exportRequirementsToExcel(requirements: Requirement[], filename?: string) {
-  const rows = requirements.map(r => {
-    const row: Record<string, string | number | undefined> = {};
-    for (const col of EXPORT_COLUMNS) {
-      const val = (r as unknown as Record<string, unknown>)[col.key];
-      if (col.key === 'applicableStandards') {
-        row[col.header] = Array.isArray(val) ? (val as string[]).join('; ') : '';
-      } else {
-        row[col.header] = val as string | number | undefined;
-      }
-    }
-    return row;
-  });
+  const rows = requirements.map(r => ({
+    'Identifier': r.identifier,
+    'Formal Requirement Title': r.title,
+    'Category': r.category,
+    'Type': r.reqType,
+    'Status': r.status,
+    'Priority': r.priority,
+    'Acceptance Criteria': r.acceptanceCriteria,
+    'Rationale': r.rationale,
+    'Value +/- Tolerance': formatValueTolerance(r),
+    'Owner': r.owner,
+  }));
 
-  const ws = XLSX.utils.json_to_sheet(rows, { header: EXPORT_COLUMNS.map(c => c.header) });
-
-  // Set column widths
-  ws['!cols'] = EXPORT_COLUMNS.map(col => {
-    if (col.key === 'description' || col.key === 'acceptanceCriteria') return { wch: 60 };
-    if (col.key === 'rationale') return { wch: 50 };
-    if (col.key === 'title') return { wch: 35 };
-    if (col.key === 'applicableStandards') return { wch: 40 };
-    return { wch: 18 };
-  });
+  const ws = XLSX.utils.json_to_sheet(rows, { header: [...EXPORT_COLUMNS] });
+  ws['!cols'] = EXPORT_COLUMNS.map(c => ({ wch: COL_WIDTHS[c] ?? 18 }));
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Requirements');
 
-  // Also add a reference sheet with valid enum values
   const refData = [
     ['Field', 'Valid Values'],
     ['Category', VALID_CATEGORIES.join(', ')],
     ['Type', VALID_TYPES.join(', ')],
     ['Status', VALID_STATUSES.join(', ')],
     ['Priority', VALID_PRIORITIES.join(', ')],
-    ['Verification Method', VALID_METHODS.join(', ')],
+    ['', ''],
+    ['Value +/- Tolerance', ''],
+    ['', 'Nominal only: 5.0 kg'],
+    ['', 'With tolerance: 5.0 [4.5–5.5] kg'],
+    ['', 'Plus-minus: 5.0 ± 0.5 kg'],
   ];
   const refWs = XLSX.utils.aoa_to_sheet(refData);
-  refWs['!cols'] = [{ wch: 22 }, { wch: 70 }];
+  refWs['!cols'] = [{ wch: 22 }, { wch: 55 }];
   XLSX.utils.book_append_sheet(wb, refWs, 'Reference');
 
   const name = filename ?? `requirements-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
@@ -85,32 +163,20 @@ export function downloadImportTemplate() {
   const sampleRows = [
     {
       'Identifier': '(auto-generated)',
-      'Title': 'Example: Payload Capacity',
-      'Description': 'The robot shall carry a payload of 5.0 kg minimum.',
-      'Rationale': 'Customer requirement for warehouse operations.',
+      'Formal Requirement Title': 'Payload Capacity',
       'Category': 'system',
       'Type': 'performance',
       'Status': 'draft',
       'Priority': 'critical',
+      'Acceptance Criteria': 'Robot holds 5 kg at full extension for 30 sec without stalling.',
+      'Rationale': 'Customer requirement for warehouse operations.',
+      'Value +/- Tolerance': '5.0 [5.0–6.0] kg',
       'Owner': 'J. Smith',
-      'Verification Method': 'test',
-      'Acceptance Criteria': 'Robot holds 5 kg at full extension for 30 sec.',
-      'Created By': 'J. Smith',
-      'Nominal Value': 5.0,
-      'Min Value': 5.0,
-      'Max Value': '',
-      'Unit': 'kg',
-      'Applicable Standards': 'ISO 10218-1:2011',
     },
   ];
 
-  const ws = XLSX.utils.json_to_sheet(sampleRows, { header: EXPORT_COLUMNS.map(c => c.header) });
-  ws['!cols'] = EXPORT_COLUMNS.map(col => {
-    if (col.key === 'description' || col.key === 'acceptanceCriteria') return { wch: 60 };
-    if (col.key === 'rationale') return { wch: 50 };
-    if (col.key === 'title') return { wch: 35 };
-    return { wch: 18 };
-  });
+  const ws = XLSX.utils.json_to_sheet(sampleRows, { header: [...EXPORT_COLUMNS] });
+  ws['!cols'] = EXPORT_COLUMNS.map(c => ({ wch: COL_WIDTHS[c] ?? 18 }));
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Requirements');
@@ -121,14 +187,18 @@ export function downloadImportTemplate() {
     ['Type', VALID_TYPES.join(', ')],
     ['Status', VALID_STATUSES.join(', ')],
     ['Priority', VALID_PRIORITIES.join(', ')],
-    ['Verification Method', VALID_METHODS.join(', ')],
+    ['', ''],
+    ['Value +/- Tolerance formats', ''],
+    ['', 'Nominal only: 5.0 kg'],
+    ['', 'With range: 5.0 [4.5–5.5] kg'],
+    ['', 'Plus-minus: 5.0 ± 0.5 kg'],
     ['', ''],
     ['Notes', ''],
-    ['Identifier column', 'Leave blank or remove — identifiers are auto-generated on import.'],
-    ['Applicable Standards', 'Separate multiple standards with semicolons.'],
+    ['Identifier', 'Leave blank — auto-generated on import.'],
+    ['Status / Priority', 'Leave blank to default to "draft" / "medium".'],
   ];
   const refWs = XLSX.utils.aoa_to_sheet(refData);
-  refWs['!cols'] = [{ wch: 24 }, { wch: 70 }];
+  refWs['!cols'] = [{ wch: 26 }, { wch: 55 }];
   XLSX.utils.book_append_sheet(wb, refWs, 'Reference');
 
   XLSX.writeFile(wb, 'requirements-import-template.xlsx');
@@ -166,12 +236,6 @@ function normalizeStr(v: unknown): string {
   return String(v).trim();
 }
 
-function normalizeNum(v: unknown): number | undefined {
-  if (v === null || v === undefined || v === '') return undefined;
-  const n = Number(v);
-  return isNaN(n) ? undefined : n;
-}
-
 export function parseRequirementsExcel(file: ArrayBuffer): ImportResult {
   const wb = XLSX.read(file, { type: 'array' });
   const sheetName = wb.SheetNames[0];
@@ -185,33 +249,68 @@ export function parseRequirementsExcel(file: ArrayBuffer): ImportResult {
 
   for (let i = 0; i < jsonRows.length; i++) {
     const raw = jsonRows[i];
-    const rowNum = i + 2; // 1-indexed, header is row 1
+    const rowNum = i + 2;
     const rowErrors: string[] = [];
 
-    const title = normalizeStr(raw['Title']);
-    const description = normalizeStr(raw['Description']);
+    // Accept new column names with fallback to old names
+    const title = normalizeStr(raw['Formal Requirement Title'] ?? raw['Title']);
     const rationale = normalizeStr(raw['Rationale']);
+    const acceptanceCriteria = normalizeStr(raw['Acceptance Criteria']);
     const category = normalizeStr(raw['Category']).toLowerCase();
     const reqType = normalizeStr(raw['Type']).toLowerCase();
     const status = normalizeStr(raw['Status']).toLowerCase().replace(/\s+/g, '_');
     const priority = normalizeStr(raw['Priority']).toLowerCase();
     const owner = normalizeStr(raw['Owner']);
-    const verificationMethod = normalizeStr(raw['Verification Method']).toLowerCase();
-    const acceptanceCriteria = normalizeStr(raw['Acceptance Criteria']);
-    const createdBy = normalizeStr(raw['Created By']);
-    const unit = normalizeStr(raw['Unit']);
+
+    // Value +/- Tolerance: new combined column, with fallback to old separate columns
+    let nominalValue: number | undefined;
+    let minValue: number | undefined;
+    let maxValue: number | undefined;
+    let unit: string | undefined;
+
+    const combinedValue = normalizeStr(raw['Value +/- Tolerance']);
+    if (combinedValue) {
+      const parsed = parseValueTolerance(combinedValue);
+      nominalValue = parsed.nominalValue;
+      minValue = parsed.minValue;
+      maxValue = parsed.maxValue;
+      unit = parsed.unit;
+    } else {
+      // Fallback: old separate columns
+      const nomRaw = raw['Nominal Value'];
+      const minRaw = raw['Min Value'];
+      const maxRaw = raw['Max Value'];
+      const unitRaw = normalizeStr(raw['Unit']);
+      if (nomRaw !== undefined && nomRaw !== '') nominalValue = Number(nomRaw);
+      if (minRaw !== undefined && minRaw !== '') minValue = Number(minRaw);
+      if (maxRaw !== undefined && maxRaw !== '') maxValue = Number(maxRaw);
+      if (unitRaw) unit = unitRaw;
+    }
+
+    // Description: use dedicated column if present, otherwise fall back to title
+    const description = normalizeStr(raw['Description']) || title;
+
+    // Verification method and createdBy: optional legacy columns
+    const verificationMethodRaw = normalizeStr(raw['Verification Method']).toLowerCase();
+    const verificationMethod = VALID_METHODS.includes(verificationMethodRaw as VerificationMethod)
+      ? (verificationMethodRaw as VerificationMethod)
+      : 'test';
+    const createdBy = normalizeStr(raw['Created By']) || owner;
+
     const standardsStr = normalizeStr(raw['Applicable Standards']);
 
-    // Required field validation
-    if (!title) rowErrors.push('Title is required');
-    if (!description) rowErrors.push('Description is required');
+    // Validation
+    if (!title) rowErrors.push('Formal Requirement Title is required');
     if (!category) rowErrors.push('Category is required');
-    else if (!VALID_CATEGORIES.includes(category as RequirementCategory)) rowErrors.push(`Invalid category "${category}". Valid: ${VALID_CATEGORIES.join(', ')}`);
+    else if (!VALID_CATEGORIES.includes(category as RequirementCategory))
+      rowErrors.push(`Invalid category "${category}". Valid: ${VALID_CATEGORIES.join(', ')}`);
     if (!reqType) rowErrors.push('Type is required');
-    else if (!VALID_TYPES.includes(reqType as RequirementType)) rowErrors.push(`Invalid type "${reqType}". Valid: ${VALID_TYPES.join(', ')}`);
-    if (status && !VALID_STATUSES.includes(status as RequirementStatus)) rowErrors.push(`Invalid status "${status}". Valid: ${VALID_STATUSES.join(', ')}`);
-    if (priority && !VALID_PRIORITIES.includes(priority as RequirementPriority)) rowErrors.push(`Invalid priority "${priority}". Valid: ${VALID_PRIORITIES.join(', ')}`);
-    if (verificationMethod && !VALID_METHODS.includes(verificationMethod as VerificationMethod)) rowErrors.push(`Invalid verification method "${verificationMethod}". Valid: ${VALID_METHODS.join(', ')}`);
+    else if (!VALID_TYPES.includes(reqType as RequirementType))
+      rowErrors.push(`Invalid type "${reqType}". Valid: ${VALID_TYPES.join(', ')}`);
+    if (status && !VALID_STATUSES.includes(status as RequirementStatus))
+      rowErrors.push(`Invalid status "${status}". Valid: ${VALID_STATUSES.join(', ')}`);
+    if (priority && !VALID_PRIORITIES.includes(priority as RequirementPriority))
+      rowErrors.push(`Invalid priority "${priority}". Valid: ${VALID_PRIORITIES.join(', ')}`);
 
     if (rowErrors.length > 0) {
       errors.push({ row: rowNum, message: rowErrors.join('; ') });
@@ -227,12 +326,12 @@ export function parseRequirementsExcel(file: ArrayBuffer): ImportResult {
       status: (status || 'draft') as RequirementStatus,
       priority: (priority || 'medium') as RequirementPriority,
       owner: owner || createdBy,
-      verificationMethod: (verificationMethod || 'test') as VerificationMethod,
+      verificationMethod,
       acceptanceCriteria,
       createdBy,
-      nominalValue: normalizeNum(raw['Nominal Value']),
-      minValue: normalizeNum(raw['Min Value']),
-      maxValue: normalizeNum(raw['Max Value']),
+      nominalValue: isNaN(nominalValue!) ? undefined : nominalValue,
+      minValue: isNaN(minValue!) ? undefined : minValue,
+      maxValue: isNaN(maxValue!) ? undefined : maxValue,
       unit: unit || undefined,
       applicableStandards: standardsStr ? standardsStr.split(';').map(s => s.trim()).filter(Boolean) : undefined,
     });
