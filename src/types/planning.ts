@@ -4,11 +4,13 @@ import type { MilestoneType, MilestoneStatus } from './enums.ts';
 export interface Milestone {
   id: MilestoneId;
   revisionId: RevisionId;
+  parentMilestoneId?: MilestoneId;  // parent phase grouping
   name: string;
   description: string;
   milestoneType: MilestoneType;
   status: MilestoneStatus;
-  targetDate: Timestamp;
+  startDate?: Timestamp;   // bar left edge; if absent treated as point milestone
+  targetDate: Timestamp;   // bar right edge / milestone date
   actualDate?: Timestamp;
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -38,6 +40,7 @@ export interface Dependency {
   revisionId: RevisionId;
   fromMilestoneId: MilestoneId;
   toMilestoneId: MilestoneId;
+  lagDays?: number;        // finish-to-start lag in days (default 0)
   description: string;
   createdAt: Timestamp;
 }
